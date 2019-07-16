@@ -1,0 +1,6 @@
+[package]
+name = "friendly-octopus"
+version = "0.1.0"
+authors = ["moxaj <viktor.magyari92@gmail.com>"]
+
+[dependencies]
