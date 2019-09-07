@@ -1,0 +1,15 @@
+[package]
+name = "net-server"
+version = "0.1.0"
+authors = ["moxaj <viktor.magyari92@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+common = { path = "../common" }
+net = {path = "../net"}
+tokio = "0.2.0-alpha.4"
+async-trait = "0.1.11"
+futures-preview = "0.3.0-alpha.18"
+generational-arena = "0.2.2"
+bytes = "0.4.12"
+serde = "1.0.99"

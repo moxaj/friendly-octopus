@@ -1,0 +1,9 @@
+[package]
+name = "web-server-package"
+version = "0.1.0"
+authors = ["moxaj <viktor.magyari92@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+net-client = { path = "../net-client" }
+web-server = { path = "../web-server" }

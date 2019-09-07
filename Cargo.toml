@@ -1,9 +1,19 @@
-[package]
-name = "friendly-octopus"
-version = "0.1.0"
-authors = ["moxaj <viktor.magyari92@gmail.com>"]
-edition = "2018"
+[workspace]
+members = [
+    "common",
+    "net",
 
-[dependencies]
-rand = "0.7.0"
-base64 = "0.10.1"
+    # Components
+    "game-manager",
+    "net-client",
+    "net-server",
+    "web-client",
+    "web-server",
+    "desktop-client",
+
+    # Packages
+    "game-manager-package",
+    "web-client-package",
+    "web-server-package",
+    "desktop-client-package",
+]
