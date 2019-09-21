@@ -3,17 +3,20 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use futures::TryStreamExt;
+use futures::{SinkExt, StreamExt};
 use generational_arena as arena;
+use generational_arena::Arena;
 use serde;
 use tokio::codec::{FramedRead, FramedWrite};
-use tokio::net::TcpListener;
-use tokio::prelude::*;
-use tokio::sync::Lock;
+use tokio::io::split;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::Mutex;
+use tokio_io::split::WriteHalf;
 
 use async_trait::async_trait;
-use net::{BincodeDecoder, BincodeEncoder};
+use net::ClientMessage;
+use net::encode::{BincodeDecoder, BincodeEncoder};
 
 #[derive(Clone, Copy)]
 pub struct ClientId {
@@ -22,50 +25,69 @@ pub struct ClientId {
 
 #[async_trait]
 pub trait NetServer<T, U> {
-    async fn run(&mut self, mut receiver: UnboundedReceiver<(ClientId, T)>) -> io::Result<UnboundedReceiver<(ClientId, U)>>;
+    async fn run(&mut self) -> io::Result<UnboundedReceiver<(ClientId, ClientMessage<U>)>>;
+    async fn send(&mut self, client_id: ClientId, value: T);
+    async fn kick(&mut self, client_id: ClientId);
 }
 
-pub struct TcpServer {
-    port: u16
+pub struct TcpServer<T> {
+    port: u16,
+    sinks: Mutex<Arena<FramedWrite<WriteHalf<TcpStream>, BincodeEncoder<T>>>>,
+}
+
+impl<T> TcpServer<T> {
+    fn new(port: u16) -> Self {
+        Self {
+            port,
+            sinks: Mutex::new(Arena::new()),
+        }
+    }
 }
 
 #[async_trait]
-impl<T, U> NetServer<T, U> for TcpServer
+impl<T, U> NetServer<T, U> for TcpServer<T>
     where T: serde::Serialize + Unpin + Send + 'static,
           for<'de> U: serde::Deserialize<'de> + Unpin + Send + 'static {
-    async fn run(&mut self, mut receiver: UnboundedReceiver<(ClientId, T)>) -> io::Result<UnboundedReceiver<(ClientId, U)>> {
-        let (sender, other_receiver) = unbounded_channel::<(ClientId, U)>();
-        let addr = SocketAddr::new(IpAddr::from(Ipv4Addr::LOCALHOST), self.port);
-        let mut socket = TcpListener::bind(&addr).await?;
+    async fn run(&mut self) -> io::Result<UnboundedReceiver<(ClientId, ClientMessage<U>)>> {
+        let (sender, other_receiver) = unbounded_channel::<(ClientId, ClientMessage<U>)>();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.port);
+        let mut listener = TcpListener::bind(&addr).await?;
+        while let Ok((socket, _)) = listener.accept().await {
+            let (stream_raw, sink_raw) = split(socket);
+            let sink = FramedWrite::new(sink_raw, BincodeEncoder::<T>::new());
+            let mut stream = FramedRead::new(stream_raw, BincodeDecoder::<U>::new());
+            let client_id = ClientId { inner: self.sinks.lock().await.insert(sink) };
 
-        let mut sinks = Lock::new(arena::Arena::new());
-        let mut sinks_clone = sinks.clone();
+            let mut sender_clone = sender.clone();
+            tokio::spawn(async move {
+                if sender_clone.send((client_id, ClientMessage::Connect)).await.is_err() {
+                    return;
+                }
 
-        tokio::spawn(async move {
-            while let Ok((socket, _)) = socket.accept().await {
-                let (stream_raw, sink_raw) = socket.split();
-                let sink = FramedWrite::new(sink_raw, BincodeEncoder::<T>::new());
-                let stream = FramedRead::new(stream_raw, BincodeDecoder::<U>::new());
-                let client_id = ClientId { inner: sinks.lock().await.insert(sink) };
-                let sender_clone = sender.clone();
-                tokio::spawn(stream
-                    .map(move |message| message.map(|message| (client_id, message)))
-                    .map_err(|_| ())
-                    .forward(sender_clone.sink_map_err(|_| ()))
-                    .map(|_| ()));
-            }
-        });
-        tokio::spawn(async move {
-            while let Some((client_id, message)) = receiver.next().await {
-                if let Some(sink) = sinks_clone.lock().await.get_mut(client_id.inner) {
-                    if !sink.send(message).await.is_ok() {
-                        if sink.close().await.is_err() {
-                            // TODO
-                        }
+                while let Some(Ok(message)) = stream.next().await {
+                    if sender_clone.send((client_id, ClientMessage::Message(message))).await.is_err() {
+                        break;
                     }
                 }
-            }
-        });
+
+                if sender_clone.send((client_id, ClientMessage::Disconnect)).await.is_err() {
+                    // Do nothing
+                }
+            });
+        }
+
         Ok(other_receiver)
+    }
+
+    async fn send(&mut self, client_id: ClientId, value: T) {
+        if let Some(sink) = self.sinks.lock().await.get_mut(client_id.inner) {
+            if sink.send(value).await.is_err() {
+                // TODO disconnect client?
+            }
+        }
+    }
+
+    async fn kick(&mut self, client_id: ClientId) {
+        self.sinks.lock().await.remove(client_id.inner);
     }
 }
